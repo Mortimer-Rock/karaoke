@@ -2,7 +2,7 @@ const CACHE = 'kge-v1';
 const ASSETS = [
   './',
   './index.html',
-  './manifest.webmanifest',
+  './manifest.json',
   './icon-192.png',
   './icon-512.png'
 ];
