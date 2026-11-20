@@ -990,6 +990,7 @@ var recSession = false;         // 有未完成的录音会话（含暂停中）
 var recBuf = null;              // 与伴奏等长的 Floating32 缓冲，按帧写
 var recFrames = 0;              // 实际写进去的样本数
 var compFrames = 0;             // 补偿换算成帧
+var playAnchor = 0;             // 伴奏起播那一刻对应的帧号
 var comp = 0.1;                                   // 延迟补偿（秒）
 var ARC = 257.6;                                  // 环周长
 
@@ -1283,6 +1284,7 @@ function openStudio(i){
   axisIdx = 0;
   $('axWrap').style.display = 'none';
   if (capNode) capNode.port.postMessage('off');
+  keepAwake(false);
   take = curSong.take || null;
   axisOff = curSong.axisOff || 0;
   if (curSong.lyr && !curSong.times) curSong.times = curSong.lyr.map(function(){ return null; });
@@ -1425,6 +1427,7 @@ function startPlay(offset){
   stopPlay(true);
   from = Math.max(0, Math.min(curSong.dur - 0.02, offset || 0));
   t0 = c.currentTime;
+  playAnchor = Math.round((t0 - from) * c.sampleRate);
 
   srcNode = c.createBufferSource();
   srcNode.buffer = curSong.buffer;
@@ -1537,6 +1540,31 @@ function setCapIcon(mode){
                        '<path d="M7 4l13 8-13 8V4z" fill="#fff"/>';
 }
 
+/* ---- 录音期间屏幕常亮：不申请的话手机一锁屏，音频上下文就被挂起，录音直接断 ---- */
+var wakeLock = null;
+async function keepAwake(on){
+  if (!('wakeLock' in navigator)) return;
+  try {
+    if (on){
+      if (!wakeLock){
+        wakeLock = await navigator.wakeLock.request('screen');
+        wakeLock.addEventListener('release', function(){ wakeLock = null; });
+      }
+    } else if (wakeLock){
+      await wakeLock.release();
+      wakeLock = null;
+    }
+  } catch (e){ wakeLock = null; }
+}
+document.addEventListener('visibilitychange', function(){
+  if (document.hidden){
+    if (recOn) pauseRec();
+  } else {
+    if (ctx && ctx.state === 'suspended') ctx.resume();
+    if (recOn) keepAwake(true);
+  }
+});
+
 /* ---- 麦克风 ---- */
 async function ensureMic(){
   if (micNode) return;
@@ -1556,7 +1584,14 @@ async function ensureMic(){
   analyser.fftSize = 1024;
   analyser.smoothingTimeConstant = 0;
   micNode.connect(analyser);
-  console.log('[mic]', micStream.getAudioTracks()[0].getSettings());
+  var ms = micStream.getAudioTracks()[0].getSettings();
+  console.log('[mic]', ms);
+  var bad = [];
+  if (ms.echoCancellation === true) bad.push('回声');
+  if (ms.noiseSuppression === true) bad.push('降噪');
+  if (ms.autoGainControl === true) bad.push('增益');
+  $('engSub').textContent = '采样率 ' + c.sampleRate + ' · ' +
+    (bad.length ? bad.join('/') + ' 没关掉' : '回声/降噪/增益 已关');
 }
 
 /* ---- 采集 ---- */
@@ -1588,7 +1623,7 @@ async function ensureCap(){
   capNode.port.onmessage = function(e){
     if (!recOn || !recBuf) return;
     var m = e.data;
-    var start = m.f - compFrames;
+    var start = m.f - playAnchor - compFrames;
     var d = m.d, i, p;
     var n = d.length;
     for (i = 0; i < n; i++){
@@ -1621,10 +1656,11 @@ async function startRecord(){
   recSession = true;
   recOn = true;
   from = 0;
-  capNode.port.postMessage('on');
   startPlay(0);
+  capNode.port.postMessage('on');
   setCapIcon('pause');
   $('mRing').classList.add('on');
+  keepAwake(true);
   updateCap();
   return true;
 }
@@ -1638,6 +1674,7 @@ function pauseRec(){
   $('mRing').classList.remove('on');
   document.documentElement.style.setProperty('--lv', '0');
   setCapIcon('play');
+  keepAwake(false);
   updateCap();
 }
 
@@ -1649,8 +1686,9 @@ function resumeRec(){
   if (!(st >= 0) || st >= curSong.dur - 0.05) st = 0;
   from = st;
   recOn = true;
-  if (capNode) capNode.port.postMessage('on');
   startPlay(st);
+  if (capNode) capNode.port.postMessage('on');
+  keepAwake(true);
   setCapIcon('pause');
   $('mRing').classList.add('on');
   updateCap();
@@ -1666,6 +1704,7 @@ function finishRec(){
   $('mRing').classList.remove('on');
   document.documentElement.style.setProperty('--lv', '0');
   setCapIcon('play');
+  keepAwake(false);
   var got = recFrames, src = recBuf;
   recBuf = null;
   if (!got || !src){
